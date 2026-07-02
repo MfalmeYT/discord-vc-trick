@@ -34,22 +34,52 @@ async function updateChannelStatus(channelId, title) {
     }
 }
 
+// Fallback: manually scrape the playlist page for video IDs when ytpl's
+// ID validator rejects an otherwise-valid playlist URL.
+async function loadPlaylistManually(url) {
+    console.log('Falling back to manual playlist scrape...');
+    const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const html = await res.text();
+
+    const idMatches = [...html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})"/g)];
+    const uniqueIds = [...new Set(idMatches.map(m => m[1]))];
+
+    if (uniqueIds.length === 0) {
+        throw new Error('Manual scrape found 0 video IDs — playlist may be private or the page structure changed.');
+    }
+
+    // Titles get fetched lazily per-track via ytdl.getBasicInfo when played
+    return uniqueIds.map(id => ({
+        url: `https://www.youtube.com/watch?v=${id}`,
+        title: null
+    }));
+}
+
 async function loadPlaylist() {
     console.log('Fetching playlist...');
-    const playlist = await ytpl(YOUTUBE_URL, { limit: Infinity });
-    tracks = playlist.items.map(item => ({
-        url: item.shortUrl || item.url,
-        title: item.title
-    }));
-    console.log(`Loaded ${tracks.length} tracks from playlist "${playlist.title}"`);
+    try {
+        const playlist = await ytpl(YOUTUBE_URL, { limit: Infinity });
+        tracks = playlist.items.map(item => ({
+            url: item.shortUrl || item.url,
+            title: item.title
+        }));
+        console.log(`Loaded ${tracks.length} tracks via ytpl from "${playlist.title}"`);
+    } catch (err) {
+        console.warn('ytpl failed:', err.message);
+        tracks = await loadPlaylistManually(YOUTUBE_URL);
+        console.log(`Loaded ${tracks.length} tracks via manual scrape`);
+    }
+
     if (tracks.length === 0) {
-        throw new Error('Playlist resolved but contained 0 tracks — check the playlist URL/privacy settings.');
+        throw new Error('Playlist resolved but contained 0 tracks.');
     }
 }
 
 function playTrack(connection, player, channelId, index) {
     const track = tracks[index];
-    console.log(`Now playing [${index + 1}/${tracks.length}]: ${track.title}`);
+    console.log(`Now playing [${index + 1}/${tracks.length}]: ${track.title || track.url}`);
 
     const stream = ytdl(track.url, {
         filter: 'audioonly',
@@ -58,8 +88,7 @@ function playTrack(connection, player, channelId, index) {
     });
 
     stream.on('error', err => {
-        console.error(`Stream error on "${track.title}":`, err.message);
-        // Skip to next track instead of retrying the same broken one forever
+        console.error(`Stream error on "${track.url}":`, err.message);
         advance(connection, player, channelId);
     });
 
@@ -69,7 +98,14 @@ function playTrack(connection, player, channelId, index) {
 
     player.play(resource);
     connection.subscribe(player);
-    updateChannelStatus(channelId, track.title);
+
+    if (track.title) {
+        updateChannelStatus(channelId, track.title);
+    } else {
+        ytdl.getBasicInfo(track.url)
+            .then(info => updateChannelStatus(channelId, info.videoDetails.title || 'Your Soundtrack'))
+            .catch(() => updateChannelStatus(channelId, 'Your Soundtrack'));
+    }
 }
 
 function advance(connection, player, channelId) {
