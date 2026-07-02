@@ -5,8 +5,9 @@
   "dependencies": {
     "discord.js": "^14.15.3",
     "@discordjs/voice": "^0.17.0",
-    "youtube-dl-exec": "^3.0.15",
-    "libsodium-wrappers": "^0.7.15"
+    "ytdl-core": "^4.11.5",
+    "libsodium-wrappers": "^0.7.15",
+    "@discordjs/opus": "^0.9.0"
   },
   "scripts": {
     "start": "node index.js"
