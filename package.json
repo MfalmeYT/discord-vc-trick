@@ -5,7 +5,7 @@
   "dependencies": {
     "discord.js": "^14.15.3",
     "@discordjs/voice": "^0.17.0",
-    "play-dl": "^1.9.7",
+    "youtube-dl-exec": "^3.0.15",
     "libsodium-wrappers": "^0.7.15"
   },
   "scripts": {
