@@ -1,6 +1,14 @@
 const { Client, GatewayIntentBits } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior, StreamType } = require('@discordjs/voice');
-const ytdl = require('ytdl-core');
+const {
+    joinVoiceChannel,
+    createAudioPlayer,
+    createAudioResource,
+    AudioPlayerStatus,
+    NoSubscriberBehavior,
+    StreamType
+} = require('@discordjs/voice');
+const ytdl = require('@distube/ytdl-core');
+const ytpl = require('@distube/ytpl');
 
 const client = new Client({
     intents: [
@@ -11,6 +19,9 @@ const client = new Client({
 
 const YOUTUBE_URL = process.env.YOUTUBE_URL;
 
+let tracks = [];
+let currentIndex = 0;
+
 async function updateChannelStatus(channelId, title) {
     try {
         const channel = await client.channels.fetch(channelId);
@@ -19,74 +30,91 @@ async function updateChannelStatus(channelId, title) {
             await channel.setVoiceStatus(statusText);
         }
     } catch (error) {
-        console.error("Failed to update status:", error);
+        console.error('Failed to update status:', error);
     }
 }
 
-async function startPlaying(connection, player, channelId) {
-    try {
-        console.log("Fetching stream from your playlist/video...");
-        
-        // Options optimize the stream for high-quality live audio chunking
-        const stream = ytdl(YOUTUBE_URL, {
-            filter: 'audioonly',
-            highWaterMark: 1 << 25, // 32MB buffer to stop random dropping
-            quality: 'highestaudio'
-        });
-
-        const resource = createAudioResource(stream, {
-            inputType: StreamType.Arbitrary
-        });
-
-        // Grabs info to display the name on the channel status
-        ytdl.getBasicInfo(YOUTUBE_URL).then(info => {
-            updateChannelStatus(channelId, info.videoDetails.title || "Your Soundtrack");
-        }).catch(() => {
-            updateChannelStatus(channelId, "Your Soundtrack");
-        });
-
-        player.play(resource);
-        connection.subscribe(player);
-        console.log("Audio pipeline successfully established!");
-    } catch (error) {
-        console.error("Stream compilation failed. Re-attempting pipeline...", error);
-        setTimeout(() => startPlaying(connection, player, channelId), 5000);
+async function loadPlaylist() {
+    console.log('Fetching playlist...');
+    const playlist = await ytpl(YOUTUBE_URL, { limit: Infinity });
+    tracks = playlist.items.map(item => ({
+        url: item.shortUrl || item.url,
+        title: item.title
+    }));
+    console.log(`Loaded ${tracks.length} tracks from playlist "${playlist.title}"`);
+    if (tracks.length === 0) {
+        throw new Error('Playlist resolved but contained 0 tracks — check the playlist URL/privacy settings.');
     }
 }
 
-client.once('ready', () => {
+function playTrack(connection, player, channelId, index) {
+    const track = tracks[index];
+    console.log(`Now playing [${index + 1}/${tracks.length}]: ${track.title}`);
+
+    const stream = ytdl(track.url, {
+        filter: 'audioonly',
+        highWaterMark: 1 << 25,
+        quality: 'highestaudio'
+    });
+
+    stream.on('error', err => {
+        console.error(`Stream error on "${track.title}":`, err.message);
+        // Skip to next track instead of retrying the same broken one forever
+        advance(connection, player, channelId);
+    });
+
+    const resource = createAudioResource(stream, {
+        inputType: StreamType.Arbitrary
+    });
+
+    player.play(resource);
+    connection.subscribe(player);
+    updateChannelStatus(channelId, track.title);
+}
+
+function advance(connection, player, channelId) {
+    currentIndex = (currentIndex + 1) % tracks.length;
+    playTrack(connection, player, channelId, currentIndex);
+}
+
+client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}!`);
     const channelId = process.env.CHANNEL_ID;
     const guildId = process.env.GUILD_ID;
 
     try {
+        await loadPlaylist();
+
+        const guild = client.guilds.cache.get(guildId);
+        if (!guild) throw new Error(`Bot is not in guild ${guildId}`);
+
         const connection = joinVoiceChannel({
             channelId,
             guildId,
-            adapterCreator: client.guilds.cache.get(guildId).voiceAdapterCreator,
+            adapterCreator: guild.voiceAdapterCreator,
             selfMute: false,
-            selfDeaf: true,
+            selfDeaf: true
         });
+
+        connection.on('error', err => console.error('Voice connection error:', err));
 
         const player = createAudioPlayer({
             behaviors: { noSubscriber: NoSubscriberBehavior.Play }
         });
 
-        startPlaying(connection, player, channelId);
-
-        // Continuous Loop: When it hits idle, restart the soundtrack immediately
         player.on(AudioPlayerStatus.Idle, () => {
-            console.log("Soundtrack finished. Restarting loop...");
-            startPlaying(connection, player, channelId);
+            console.log('Track finished, advancing...');
+            advance(connection, player, channelId);
         });
 
         player.on('error', error => {
-            console.error(`Audio pipeline error: ${error.message}`);
-            startPlaying(connection, player, channelId);
+            console.error(`Player error: ${error.message}`);
+            advance(connection, player, channelId);
         });
 
+        playTrack(connection, player, channelId, currentIndex);
     } catch (error) {
-        console.error("Voice connection failed:", error);
+        console.error('Startup failed:', error);
     }
 });
 
