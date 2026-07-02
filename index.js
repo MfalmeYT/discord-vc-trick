@@ -1,6 +1,6 @@
 const { Client, GatewayIntentBits } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior, StreamType } = require('@discordjs/voice');
-const ytdl = require('youtube-dl-exec');
+const ytdl = require('ytdl-core');
 
 const client = new Client({
     intents: [
@@ -9,9 +9,7 @@ const client = new Client({
     ]
 });
 
-const YOUTUBE_URL = process.env.YOUTUBE_URL || 'https://youtube.com/playlist?list=PLOi4TJ4YyqM4&si=kCAz-6rFC6GhItU7';
-let songQueue = [];
-let currentSongIndex = 0;
+const YOUTUBE_URL = process.env.YOUTUBE_URL;
 
 async function updateChannelStatus(channelId, title) {
     try {
@@ -25,75 +23,41 @@ async function updateChannelStatus(channelId, title) {
     }
 }
 
-async function loadPlaylist() {
-    try {
-        console.log("Fetching playlist data via yt-dlp...");
-        // This extracts the titles and direct video URLs from the playlist
-        const data = await ytdl(YOUTUBE_URL, {
-            dumpSingleJson: true,
-            flatPlaylist: true,
-            noWarnings: true,
-        });
-
-        if (data && data.entries) {
-            songQueue = data.entries.map(entry => ({
-                title: entry.title || "Unknown Track",
-                url: `https://www.youtube.com/watch?v=${entry.id}`
-            }));
-            console.log(`Loaded ${songQueue.length} tracks from playlist.`);
-        } else {
-            songQueue = [{ title: data.title || "Single Video", url: YOUTUBE_URL }];
-        }
-    } catch (error) {
-        console.error("Error loading tracks via yt-dlp:", error);
-    }
-}
-
 async function startPlaying(connection, player, channelId) {
-    if (songQueue.length === 0) {
-        await loadPlaylist();
-        currentSongIndex = 0;
-        if (songQueue.length === 0) return;
-    }
-
-    const track = songQueue[currentSongIndex];
-    console.log(`Playing [${currentSongIndex + 1}/${songQueue.length}]: ${track.title}`);
-
     try {
-        // Query the direct, high-quality audio stream URL using yt-dlp
-        const output = await ytdl(track.url, {
-            getUrl: true,
-            format: 'bestaudio'
+        console.log("Fetching stream from your playlist/video...");
+        
+        // Options optimize the stream for high-quality live audio chunking
+        const stream = ytdl(YOUTUBE_URL, {
+            filter: 'audioonly',
+            highWaterMark: 1 << 25, // 32MB buffer to stop random dropping
+            quality: 'highestaudio'
         });
 
-        const streamUrl = output.trim();
-        const resource = createAudioResource(streamUrl, {
+        const resource = createAudioResource(stream, {
             inputType: StreamType.Arbitrary
         });
 
-        await updateChannelStatus(channelId, track.title);
+        // Grabs info to display the name on the channel status
+        ytdl.getBasicInfo(YOUTUBE_URL).then(info => {
+            updateChannelStatus(channelId, info.videoDetails.title || "Your Soundtrack");
+        }).catch(() => {
+            updateChannelStatus(channelId, "Your Soundtrack");
+        });
+
         player.play(resource);
         connection.subscribe(player);
+        console.log("Audio pipeline successfully established!");
     } catch (error) {
-        console.error(`Stream error on "${track.title}":`, error);
-        advanceQueue(connection, player, channelId);
+        console.error("Stream compilation failed. Re-attempting pipeline...", error);
+        setTimeout(() => startPlaying(connection, player, channelId), 5000);
     }
 }
 
-function advanceQueue(connection, player, channelId) {
-    currentSongIndex++;
-    if (currentSongIndex >= songQueue.length) {
-        currentSongIndex = 0;
-    }
-    startPlaying(connection, player, channelId);
-}
-
-client.once('ready', async () => {
+client.once('ready', () => {
     console.log(`Logged in as ${client.user.tag}!`);
     const channelId = process.env.CHANNEL_ID;
     const guildId = process.env.GUILD_ID;
-
-    await loadPlaylist();
 
     try {
         const connection = joinVoiceChannel({
@@ -110,17 +74,19 @@ client.once('ready', async () => {
 
         startPlaying(connection, player, channelId);
 
+        // Continuous Loop: When it hits idle, restart the soundtrack immediately
         player.on(AudioPlayerStatus.Idle, () => {
-            advanceQueue(connection, player, channelId);
+            console.log("Soundtrack finished. Restarting loop...");
+            startPlaying(connection, player, channelId);
         });
 
         player.on('error', error => {
-            console.error(`Audio player error: ${error.message}`);
-            advanceQueue(connection, player, channelId);
+            console.error(`Audio pipeline error: ${error.message}`);
+            startPlaying(connection, player, channelId);
         });
 
     } catch (error) {
-        console.error("Connection error:", error);
+        console.error("Voice connection failed:", error);
     }
 });
 
